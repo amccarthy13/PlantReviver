@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+# Secrets can also be supplied via TF_VAR_* env vars or HCP variable sets.
+
+service_name          = "plantreviver"
+repo_url              = "https://github.com/amccarthy13/PlantReviver"
+branch                = "main"
+cloudflare_account_id = "your-cloudflare-account-id"
+jwt_secret            = "generate-a-long-random-string"
