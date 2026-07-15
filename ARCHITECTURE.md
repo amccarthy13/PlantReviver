@@ -223,6 +223,24 @@ app binary. AI/weather keys are only ever used server-side.
 StoreKit **sandbox vs. production** subscription environments (tracked by
 `subscriptions.environment`).
 
+Three environments, but **only two are deployed to the cloud** — `dev` is the
+backend running locally (`uvicorn` + local Postgres), which is free and the
+fastest iteration loop. `staging` exists mainly so **subscription testing has a
+home**: TestFlight and sandbox purchases generate StoreKit **sandbox**
+transactions and notifications that must not touch prod data or real users. It
+also gives migrations and destructive admin actions (ban/delete) a safe place to
+run. Since it's fully IaC, `staging` can be `terraform destroy`'d between testing
+pushes to save the ~$15/mo.
+
+**Client build → environment mapping.** The iOS app selects its API base URL per
+**Xcode build configuration**, pairing each distribution stage with a backend:
+
+| iOS build | Backend | StoreKit |
+|---|---|---|
+| Simulator (Debug) | local (or staging) | — |
+| TestFlight (beta) | **staging** | sandbox |
+| App Store (Release) | **prod** | production |
+
 **Backend (Render):**
 - Dockerized FastAPI, deployed as a **Web Service** provisioned by Terraform.
 - **Managed Postgres** with automated backups + point-in-time recovery.
@@ -445,6 +463,22 @@ no extra service or cost. Users and entitlements are editable (so you can ban an
 account or manually grant premium); everything else is read-only.
 
 - Protected by a **separate admin login** (`AuthenticationBackend`, env-var
-  credentials distinct from user JWT auth) — set a strong `ADMIN_PASSWORD` and
-  `ADMIN_SESSION_SECRET` in prod, and ideally IP-restrict `/admin` at the edge.
+  credentials distinct from user JWT auth).
 - Lives in `app/admin/` (`auth.py`, `views.py`, `setup.py`).
+
+**Accessing it in prod.** It rides on the deployed service, so it's a path on
+the Render URL: `https://<service>/admin`. Credentials come from Render env
+secrets; HTTPS is automatic. Because that path is publicly reachable, harden it
+in this order:
+
+- **Minimum:** strong `ADMIN_PASSWORD` + `ADMIN_SESSION_SECRET`; the global rate
+  limiter adds brute-force friction.
+- **Preferred (free):** once Cloudflare fronts the API, gate `/admin` with
+  **Cloudflare Access (Zero Trust)** — email/SSO required *before* the request
+  reaches the app, so the login page isn't even exposed publicly. Free up to 50
+  users.
+- The admin session cookie isn't `Secure`-flagged by default; Render's enforced
+  HTTPS covers this in practice, and Cloudflare Access makes it moot.
+
+Each environment exposes its own `/admin`; do destructive testing against
+`staging`.
