@@ -24,6 +24,8 @@ These are settled. Anything not listed here is open.
 | Concurrency model | Fully async end-to-end: async routes, async SQLAlchemy, `httpx.AsyncClient` for all external calls | Performance practice; no sync calls blocking the event loop |
 | Service topology | Single **modular monolith** (bounded modules in one FastAPI app) | Solo project; logical seams allow later extraction — microservices would be pure overhead |
 | Client repo | Same monorepo, `ios/` | No technical need to split; atomic API+client commits; path-filtered CI |
+| Rate limiting | `slowapi` (in-memory now, Redis later) | Per-user/IP request throttling — §12 |
+| Admin dashboard | **SQLAdmin** mounted at `/admin` | Auto-generated CRUD over existing models; in-process, free — §12 |
 | Hosting | **Render** | Managed Postgres, background workers, cron, and Key Value (Redis) are all first-class — the "later" pieces need no provider switch |
 | Object storage | Cloudflare R2 (S3-compatible) | Photo storage with **no egress fees**; pre-signed uploads |
 | Auth | Sign in with Apple → app-issued JWT (access + refresh) | No passwords; Apple manages identity |
@@ -131,7 +133,8 @@ All user-owned, syncable tables carry `id` (UUID, **client-generated**),
 engine relies on (see §11). Omitted below for brevity where marked *(+sync)*.
 
 ```
-users              id, apple_user_id (unique), email?, created_at, deleted_at?
+users              id, apple_user_id (unique), email?, created_at,
+                   disabled_at? (ban), deleted_at?
 plants (+sync)     id, user_id → users, name, species_id? → species,
                    primary_photo_id? → photos, watering_interval_days?,
                    next_watering_date?, last_watered_at?, notes, created_at
@@ -144,6 +147,8 @@ subscriptions      id, user_id → users, product_id, status, expires_at,
                    original_transaction_id, environment (sandbox|production)
 entitlements       id, user_id → users, feature, active, source              # derived
 devices            id, user_id → users, apns_token, platform, last_seen
+usage_counters     id, user_id → users, feature, period, count               # per-user quota (§12)
+                     unique(user_id, feature, period)
 ```
 
 **Modeling decisions:**
@@ -353,3 +358,93 @@ here because the data is single-user and low-conflict.
 SwiftData is durable (SQLite/Core Data underneath) and fine for this. If its
 newer APIs ever prove limiting, **GRDB** is the fallback for direct SQLite
 control — not a preemptive switch.
+
+---
+
+## 12. Abuse & cost safeguards
+
+Three distinct mechanisms, each solving a different problem — don't conflate
+them. Applied as defense in depth, outermost layer first.
+
+### The three mechanisms
+
+| Mechanism | Protects against | Unit | Scope |
+|---|---|---|---|
+| **Rate limiting** | bursts / DDoS / hammering | requests **per time** | per-user + per-IP |
+| **Quota** | sustained **cost** abuse | total **per period** | per-user |
+| **Circuit breaker** | catastrophic runaway (bug/attack) | global **hard ceiling** | whole system |
+
+A rate limit doesn't cap cost (staying just under the limit still runs up a
+bill) — that's the quota's job. Per-user quotas don't stop a server-side loop
+bug — that's the circuit breaker's job. The expensive paths get all three, plus
+**input constraints** (size/type/count) as a preventative fourth layer.
+
+### Layers (outermost first)
+
+1. **Edge — Cloudflare in front of Render:** DDoS protection, coarse IP rate
+   limits, request body-size cap, WAF. Free tier; Cloudflare is already in the
+   stack for R2. *(Requires routing the API through a Cloudflare-proxied custom
+   domain — recommended, low cost.)*
+2. **Auth gate:** every endpoint requires a valid Apple-issued JWT. One Apple ID
+   ≈ one account, so mass account creation is hard.
+3. **App rate limiter:** `slowapi`, in-memory backend at launch (single
+   instance); swap to its Redis backend when scaling to multiple instances.
+4. **Business quotas + entitlement gate:** premium-gating AI means only paying
+   users reach it and revenue offsets cost; per-user usage is still capped.
+5. **External-cost guard:** per-user quota → global circuit breaker →
+   **provider budget caps** (hard billing limits + alerts set in the Anthropic /
+   OpenWeather consoles — the backstop outside our code).
+6. **Storage constraints:** pre-signed uploads with size/type limits + lifecycle
+   cleanup.
+
+### AI cost control (the only meaningfully variable cost)
+
+R2 has no egress fees and Render is mostly flat, so AI is the spend to guard.
+Four independent gates must *all* fail for a runaway bill:
+
+- **Premium entitlement gate** — only subscribers reach AIService.
+- **Per-user quota** — a Postgres `usage_counters` table (`user_id, feature,
+  period, count`), checked-and-incremented atomically **before** the provider
+  call. Durable and multi-instance-safe with no Redis.
+- **Global circuit breaker** — an `AI_ENABLED` env-var kill switch (instant
+  manual shutoff) plus a global monthly counter that auto-disables AI past a
+  hard threshold.
+- **Provider budget cap** — hard spend limit in the Anthropic dashboard.
+- **Result caching** — cache identification results by **image content hash** so
+  re-submitting the same photo never re-bills.
+
+### Image upload constraints
+
+- Pre-signed R2 URL with a `content-length-range` (e.g. ≤10 MB) + content-type
+  allowlist + short expiry.
+- Client downscales before upload; server validates type on the confirm step.
+- Per-plant / per-user photo count caps.
+- R2 lifecycle rule purges orphaned/`pending` uploads.
+
+### Request hygiene
+
+- Body-size limit (edge + app).
+- **Max batch size on `POST /sync/push`**; pagination caps on reads.
+- Pydantic validation rejects malformed payloads (already in place).
+- `disabled_at` flag on `users` as an instant per-account ban.
+
+### Ships at launch vs deferred
+
+- **At launch:** auth gate, `slowapi` in-memory rate limits, Postgres-backed
+  quotas, `AI_ENABLED` kill switch, provider budget caps, upload constraints,
+  sync batch cap, ban flag.
+- **Deferred (with scale):** Cloudflare edge layer (when a custom domain lands),
+  Redis-backed rate limiting (when multi-instance). Both are additive.
+
+### Admin dashboard
+
+Operator control (view users, ban via `disabled_at`, delete, inspect
+subscriptions / entitlements / usage) is provided by **SQLAdmin** mounted at
+`/admin` on the same FastAPI app — auto-generated CRUD over the existing models,
+no extra service or cost. Users and entitlements are editable (so you can ban an
+account or manually grant premium); everything else is read-only.
+
+- Protected by a **separate admin login** (`AuthenticationBackend`, env-var
+  credentials distinct from user JWT auth) — set a strong `ADMIN_PASSWORD` and
+  `ADMIN_SESSION_SECRET` in prod, and ideally IP-restrict `/admin` at the edge.
+- Lives in `app/admin/` (`auth.py`, `views.py`, `setup.py`).

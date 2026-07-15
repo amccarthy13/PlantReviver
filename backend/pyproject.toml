@@ -15,6 +15,9 @@ dependencies = [
     "pyjwt[crypto]>=2.10",
     "httpx>=0.28",
     "boto3>=1.35",
+    "slowapi>=0.1.9",
+    "sqladmin>=0.18",
+    "itsdangerous>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +43,10 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["slowapi.*", "sqladmin.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

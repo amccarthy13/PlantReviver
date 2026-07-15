@@ -15,6 +15,10 @@ class User(Base, TimestampMixin):
         String(255), unique=True, index=True, nullable=False
     )
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    # Instant per-account ban / kill switch (ARCHITECTURE.md §12).
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Soft delete for Apple's account-deletion requirement + grace period.
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

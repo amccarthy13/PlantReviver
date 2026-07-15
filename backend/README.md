@@ -44,11 +44,13 @@ uv run pytest
 
 ```
 app/
-  main.py          FastAPI app factory
+  main.py          FastAPI app factory (wires rate limiter + admin)
   config.py        settings (env-driven)
   db.py            async engine + pool, session dependency
   deps.py          shared dependencies (current user, entitlement gate)
   security.py      JWT + Apple identity verification
+  ratelimit.py     slowapi limiter (§12)
+  admin/           SQLAdmin dashboard at /admin (§12)
   models/          SQLAlchemy ORM models
   schemas/         Pydantic request/response models
   repositories/    DB access

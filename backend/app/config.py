@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
 
+    # Rate limiting (slowapi; in-memory now, Redis when multi-instance) — §12
+    rate_limit_default: str = "200/minute"
+
+    # AI cost circuit breaker (§12) — instant manual kill switch
+    ai_enabled: bool = True
+
+    # Admin dashboard (SQLAdmin). MUST be overridden with strong values in prod.
+    admin_username: str = "admin"
+    admin_password: str = "change-me-admin"
+    admin_session_secret: str = "dev-insecure-admin-session-secret"
+
 
 @lru_cache
 def get_settings() -> Settings:
